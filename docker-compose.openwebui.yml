@@ -1,0 +1,24 @@
+services:
+  nanobot-openai-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.openai_api
+    container_name: nanobot-openai-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${HOME}/.nanobot:/root/.nanobot
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      # Make Open WebUI talk to our OpenAI-compatible endpoint
+      - OPENAI_API_BASE_URL=http://nanobot-openai-api:8000/v1
+      - OPENAI_API_KEY=dummy
+      # Optional: skip auth for local testing
+      - WEBUI_AUTH=false
+    depends_on:
+      - nanobot-openai-api

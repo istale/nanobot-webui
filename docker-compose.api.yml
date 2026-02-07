@@ -1,0 +1,14 @@
+services:
+  nanobot-openai-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.openai_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your nanobot config + workspace from host
+      - ${HOME}/.nanobot:/root/.nanobot
+    environment:
+      # Optional: if you want to point LiteLLM at a different base URL
+      # - OPENAI_API_BASE=...
+      - TZ=UTC

@@ -33,10 +33,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+]
+
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
+    "httpx>=0.25.0",
 ]
 
 [project.scripts]
@@ -47,15 +53,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["nanobot", "nanobot_api"]
 
 [tool.hatch.build.targets.wheel.sources]
 "nanobot" = "nanobot"
+"nanobot_api" = "nanobot_api"
 
 # Include non-Python files in skills
 [tool.hatch.build]
 include = [
     "nanobot/**/*.py",
+    "nanobot_api/**/*.py",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
 ]
