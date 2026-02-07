@@ -106,8 +106,9 @@ async def list_models() -> dict[str, Any]:
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionsResponse)
 async def chat_completions(req: ChatCompletionsRequest) -> Any:
-    if req.stream:
-        raise HTTPException(status_code=400, detail="stream=true is not supported in this minimal server")
+    # Open WebUI may request stream=true for SSE.
+    # For minimal compatibility, we currently ignore streaming and return a normal JSON response.
+    # (A future improvement is to implement proper SSE streaming.)
 
     agent: AgentLoop = getattr(app.state, "agent", None)
     if agent is None:
