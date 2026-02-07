@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from nanobot.bus.queue import MessageBus
 from nanobot.agent.loop import AgentLoop
@@ -104,12 +106,15 @@ async def list_models() -> dict[str, Any]:
     }
 
 
+def _sse_data(obj: dict[str, Any]) -> bytes:
+    # OpenAI-compatible streaming uses: `data: <json>\n\n`
+    import json
+
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
 @app.post("/v1/chat/completions", response_model=ChatCompletionsResponse)
 async def chat_completions(req: ChatCompletionsRequest) -> Any:
-    # Open WebUI may request stream=true for SSE.
-    # For minimal compatibility, we currently ignore streaming and return a normal JSON response.
-    # (A future improvement is to implement proper SSE streaming.)
-
     agent: AgentLoop = getattr(app.state, "agent", None)
     if agent is None:
         raise HTTPException(status_code=500, detail="Agent not initialized")
@@ -117,28 +122,89 @@ async def chat_completions(req: ChatCompletionsRequest) -> Any:
     prompt = _extract_prompt(req)
     sess = _session_key(req)
 
-    # AgentLoop session_key is derived from InboundMessage.channel/chat_id.
-    # We map chat_id to our computed session key so history persists per user+conversation.
-    content = await agent.process_direct(
-        prompt,
-        session_key=f"openai:{sess}",
-        channel="openai",
-        chat_id=sess,
-    )
-
     now = int(time.time())
     model = req.model or getattr(agent, "model", "nanobot")
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
-    return ChatCompletionsResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex}",
-        created=now,
-        model=model,
-        choices=[
-            ChatCompletionsResponseChoice(
-                index=0,
-                message={"role": "assistant", "content": content},
-                finish_reason="stop",
+    # Non-stream response (classic OpenAI JSON)
+    if not req.stream:
+        content = await agent.process_direct(
+            prompt,
+            session_key=f"openai:{sess}",
+            channel="openai",
+            chat_id=sess,
+        )
+
+        return ChatCompletionsResponse(
+            id=completion_id,
+            created=now,
+            model=model,
+            choices=[
+                ChatCompletionsResponseChoice(
+                    index=0,
+                    message={"role": "assistant", "content": content},
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        )
+
+    # Stream response (SSE). Our underlying agent currently produces a full response,
+    # so we simulate token streaming by chunking the final content.
+    async def gen():
+        content = await agent.process_direct(
+            prompt,
+            session_key=f"openai:{sess}",
+            channel="openai",
+            chat_id=sess,
+        )
+
+        # First chunk: announce role
+        yield _sse_data(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": now,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+        )
+
+        chunk_size = 60
+        for i in range(0, len(content), chunk_size):
+            part = content[i : i + chunk_size]
+            yield _sse_data(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": now,
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": {"content": part}, "finish_reason": None}
+                    ],
+                }
             )
-        ],
-        usage=None,
+            # Tiny pause so UI can render progressively (optional)
+            await asyncio.sleep(0)
+
+        # Final chunk
+        yield _sse_data(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": now,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        )
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
