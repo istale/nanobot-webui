@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+
+from nanobot.bus.queue import MessageBus
+from nanobot.agent.loop import AgentLoop
+from nanobot.config.loader import load_config
+from nanobot.providers.litellm_provider import LiteLLMProvider
+
+from nanobot_api.schemas import ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChoice
+
+
+def _make_agent() -> AgentLoop:
+    config = load_config()
+    bus = MessageBus()
+
+    provider_cfg = config.get_provider(config.agents.defaults.model)
+    api_key = provider_cfg.api_key if provider_cfg else None
+
+    # Allow running without key if using models that don't need it (e.g., bedrock/*)
+    model = config.agents.defaults.model
+    if not api_key and not model.lower().startswith("bedrock/"):
+        raise RuntimeError(
+            "No API key configured. Create ~/.nanobot/config.json with providers.<name>.apiKey"
+        )
+
+    provider = LiteLLMProvider(
+        api_key=api_key,
+        api_base=config.get_api_base(model),
+        default_model=model,
+        extra_headers=provider_cfg.extra_headers if provider_cfg else None,
+    )
+
+    # Ensure workspace exists
+    workspace: Path = config.workspace_path
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    return AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        model=model,
+        max_iterations=config.agents.defaults.max_tool_iterations,
+        brave_api_key=config.tools.web.search.api_key or None,
+        exec_config=config.tools.exec,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
+    )
+
+
+def _session_key(req: ChatCompletionsRequest) -> str:
+    user = (req.user or "default").strip() or "default"
+    conv = (req.conversation_id or "default").strip() or "default"
+    return f"{user}:{conv}"
+
+
+def _extract_prompt(req: ChatCompletionsRequest) -> str:
+    # Minimal behavior: use the last user message content as the prompt.
+    for m in reversed(req.messages):
+        if m.role == "user":
+            return m.content or ""
+    # Fallback: last message content
+    if req.messages:
+        return req.messages[-1].content or ""
+    return ""
+
+
+app = FastAPI(title="nanobot OpenAI-compatible API", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    # For tests (or custom embedding), allow skipping real agent creation.
+    if os.getenv("NANOBOT_API_DISABLE_STARTUP_AGENT") in {"1", "true", "TRUE"}:
+        return
+    app.state.agent = _make_agent()
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/v1/models")
+async def list_models() -> dict[str, Any]:
+    # Open WebUI expects this endpoint to populate the model dropdown.
+    # Keep minimal: expose the configured default model.
+    config = load_config()
+    model = config.agents.defaults.model
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": model,
+                "object": "model",
+                "owned_by": "nanobot",
+            }
+        ],
+    }
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionsResponse)
+async def chat_completions(req: ChatCompletionsRequest) -> Any:
+    if req.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported in this minimal server")
+
+    agent: AgentLoop = getattr(app.state, "agent", None)
+    if agent is None:
+        raise HTTPException(status_code=500, detail="Agent not initialized")
+
+    prompt = _extract_prompt(req)
+    sess = _session_key(req)
+
+    # AgentLoop session_key is derived from InboundMessage.channel/chat_id.
+    # We map chat_id to our computed session key so history persists per user+conversation.
+    content = await agent.process_direct(
+        prompt,
+        session_key=f"openai:{sess}",
+        channel="openai",
+        chat_id=sess,
+    )
+
+    now = int(time.time())
+    model = req.model or getattr(agent, "model", "nanobot")
+
+    return ChatCompletionsResponse(
+        id=f"chatcmpl-{uuid.uuid4().hex}",
+        created=now,
+        model=model,
+        choices=[
+            ChatCompletionsResponseChoice(
+                index=0,
+                message={"role": "assistant", "content": content},
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
