@@ -39,12 +39,12 @@ def test_chat_completions_smoke(monkeypatch):
     assert data["choices"][0]["message"]["content"] == "echo:u1:c1:hello"
 
 
-def test_stream_not_supported(monkeypatch):
+def test_stream_smoke(monkeypatch):
     from nanobot_api.app import app
 
     class DummyAgent:
         async def process_direct(self, content: str, session_key: str, channel: str, chat_id: str):
-            return "ok"
+            return "ok-stream"
 
     app.state.agent = DummyAgent()
     client = TestClient(app)
@@ -52,4 +52,5 @@ def test_stream_not_supported(monkeypatch):
         "/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
     )
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")

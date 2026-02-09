@@ -15,7 +15,15 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.config.loader import load_config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 
-from nanobot_api.schemas import ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChoice
+import httpx
+
+from nanobot_api.schemas import (
+    BrainSuggestRequest,
+    BrainSuggestResponse,
+    ChatCompletionsRequest,
+    ChatCompletionsResponse,
+    ChatCompletionsResponseChoice,
+)
 
 
 def _make_agent() -> AgentLoop:
@@ -72,6 +80,38 @@ def _extract_prompt(req: ChatCompletionsRequest) -> str:
     return ""
 
 
+async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | None:
+    """Ask the "central brain" for a reply suggestion.
+
+    Enable by setting env:
+      NANOBOT_BRAIN_SUGGEST_URL=http(s)://.../suggest
+
+    This is synchronous (blocking) by design (user choice = 1).
+    """
+    url = (os.getenv("NANOBOT_BRAIN_SUGGEST_URL") or "").strip()
+    if not url:
+        return None
+
+    payload = BrainSuggestRequest(
+        user=(req.user or "default").strip() or "default",
+        conversation_id=(req.conversation_id or "default").strip() or "default",
+        messages=req.messages,
+        model=req.model,
+    )
+
+    timeout_s = float(os.getenv("NANOBOT_BRAIN_TIMEOUT_S") or "2.0")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            r = await client.post(url, json=payload.model_dump(by_alias=True))
+            r.raise_for_status()
+            data = r.json()
+            return BrainSuggestResponse.model_validate(data)
+    except Exception:
+        # Central brain must never break the chat path.
+        return None
+
+
 app = FastAPI(title="nanobot OpenAI-compatible API", version="0.1.0")
 
 
@@ -122,18 +162,30 @@ async def chat_completions(req: ChatCompletionsRequest) -> Any:
     prompt = _extract_prompt(req)
     sess = _session_key(req)
 
+    # Optional: consult the "central brain" for a direct answer or hint.
+    brain = await _brain_suggest(req)
+
     now = int(time.time())
     model = req.model or getattr(agent, "model", "nanobot")
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
     # Non-stream response (classic OpenAI JSON)
     if not req.stream:
-        content = await agent.process_direct(
-            prompt,
-            session_key=f"openai:{sess}",
-            channel="openai",
-            chat_id=sess,
-        )
+        # If central brain provides a direct reply, return it immediately.
+        if brain and brain.suggested_reply:
+            content = brain.suggested_reply
+        else:
+            # If brain provides a hint, prepend it as a system instruction.
+            effective_prompt = prompt
+            if brain and brain.system_hint:
+                effective_prompt = f"[CENTRAL_HINT]\n{brain.system_hint.strip()}\n\n{prompt}"
+
+            content = await agent.process_direct(
+                effective_prompt,
+                session_key=f"openai:{sess}",
+                channel="openai",
+                chat_id=sess,
+            )
 
         return ChatCompletionsResponse(
             id=completion_id,
@@ -152,12 +204,20 @@ async def chat_completions(req: ChatCompletionsRequest) -> Any:
     # Stream response (SSE). Our underlying agent currently produces a full response,
     # so we simulate token streaming by chunking the final content.
     async def gen():
-        content = await agent.process_direct(
-            prompt,
-            session_key=f"openai:{sess}",
-            channel="openai",
-            chat_id=sess,
-        )
+        # If central brain provides a direct reply, stream that reply.
+        if brain and brain.suggested_reply:
+            content = brain.suggested_reply
+        else:
+            effective_prompt = prompt
+            if brain and brain.system_hint:
+                effective_prompt = f"[CENTRAL_HINT]\n{brain.system_hint.strip()}\n\n{prompt}"
+
+            content = await agent.process_direct(
+                effective_prompt,
+                session_key=f"openai:{sess}",
+                channel="openai",
+                chat_id=sess,
+            )
 
         # First chunk: announce role
         yield _sse_data(

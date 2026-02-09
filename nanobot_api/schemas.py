@@ -40,3 +40,30 @@ class ChatCompletionsResponse(BaseModel):
     choices: list[ChatCompletionsResponseChoice]
     # usage is optional in OpenAI responses; keep minimal
     usage: dict[str, int] | None = None
+
+
+# ---------------------------------------------------------------------------
+# "Central brain" suggestion protocol (Nanobot -> Brain)
+# ---------------------------------------------------------------------------
+
+
+class BrainSuggestRequest(BaseModel):
+    # Identify who/where this conversation belongs to
+    user: str
+    conversation_id: str
+
+    # Full OpenAI-style message list (complete dialog context)
+    messages: list[ChatMessage]
+
+    # Optional extra context
+    model: str | None = None
+
+
+class BrainSuggestResponse(BaseModel):
+    # If provided, Nanobot may directly answer with this content.
+    suggested_reply: str | None = None
+
+    # Optional hint to inject (system-style) when not providing direct answer.
+    system_hint: str | None = None
+
+    confidence: float | None = None
