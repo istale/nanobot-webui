@@ -231,6 +231,15 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
     return None
 
 
+BASE_SYSTEM_PROMPT_ZH = (
+    "你是 Nanobot，負責對使用者回覆。\n"
+    "系統中存在一個『中央大腦（小號）』可提供權威答案（例如工具代稱、固定規則、專案約定）。\n"
+    "- 若你拿到中央大腦提供的 suggested_reply，必須直接採用，不要自行改寫。\n"
+    "- 若你收到以 [CENTRAL_HINT] 開頭的提示，視為高優先權指示並遵守。\n"
+    "- 若中央大腦未回覆（例如 timeout），你才可以自行推理回答，但請保守，必要時說明需要確認。"
+)
+
+
 app = FastAPI(title="nanobot OpenAI-compatible API", version="0.1.0")
 
 
@@ -295,9 +304,11 @@ async def chat_completions(req: ChatCompletionsRequest) -> Any:
             content = brain.suggested_reply
         else:
             # If brain provides a hint, prepend it as a system instruction.
-            effective_prompt = prompt
+            hint = ""
             if brain and brain.system_hint:
-                effective_prompt = f"[CENTRAL_HINT]\n{brain.system_hint.strip()}\n\n{prompt}"
+                hint = f"\n\n[CENTRAL_HINT]\n{brain.system_hint.strip()}"
+
+            effective_prompt = f"[SYSTEM]\n{BASE_SYSTEM_PROMPT_ZH}{hint}\n\n{prompt}"
 
             content = await agent.process_direct(
                 effective_prompt,
@@ -327,9 +338,11 @@ async def chat_completions(req: ChatCompletionsRequest) -> Any:
         if brain and brain.suggested_reply:
             content = brain.suggested_reply
         else:
-            effective_prompt = prompt
+            hint = ""
             if brain and brain.system_hint:
-                effective_prompt = f"[CENTRAL_HINT]\n{brain.system_hint.strip()}\n\n{prompt}"
+                hint = f"\n\n[CENTRAL_HINT]\n{brain.system_hint.strip()}"
+
+            effective_prompt = f"[SYSTEM]\n{BASE_SYSTEM_PROMPT_ZH}{hint}\n\n{prompt}"
 
             content = await agent.process_direct(
                 effective_prompt,

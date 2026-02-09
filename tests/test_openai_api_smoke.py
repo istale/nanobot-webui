@@ -36,7 +36,10 @@ def test_chat_completions_smoke(monkeypatch):
     data = r.json()
     assert data["object"] == "chat.completion"
     assert data["choices"][0]["message"]["role"] == "assistant"
-    assert data["choices"][0]["message"]["content"] == "echo:u1:c1:hello"
+    content = data["choices"][0]["message"]["content"]
+    assert content.startswith("echo:u1:c1:")
+    assert content.endswith("hello")
+    assert "[SYSTEM]" in content
 
 
 def test_stream_smoke(monkeypatch):

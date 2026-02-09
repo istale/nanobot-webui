@@ -44,7 +44,6 @@ def test_brain_suggest_direct_reply(monkeypatch):
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "鋼鐵人"
 
-    # restore (defensive)
     monkeypatch.setattr(httpx, "AsyncClient", real_async_client)
 
 
@@ -90,6 +89,8 @@ def test_brain_suggest_hint(monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "ok"
+    assert "[SYSTEM]" in seen["prompt"]
+    assert "中央大腦（小號）" in seen["prompt"]
     assert "[CENTRAL_HINT]" in seen["prompt"]
     assert "Answer with the alias." in seen["prompt"]
 
