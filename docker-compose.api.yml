@@ -3,15 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.openai_api
-    ports:
-      - "8000:8000"
+
+    # Use host networking so the container can reach OpenClaw Gateway bound to 127.0.0.1
+    # (OpenClaw default: loopback-only). This avoids widening OpenClaw's bind surface.
+    network_mode: host
+
     volumes:
       # Mount your nanobot config + workspace from host
       - ${HOME}/.nanobot:/root/.nanobot
+
     env_file:
       - .env
-    extra_hosts:
-      # Allow container to reach host loopback services (OpenClaw gateway)
-      - "host.docker.internal:host-gateway"
+
     environment:
       - TZ=UTC

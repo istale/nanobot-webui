@@ -153,9 +153,11 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
     # 1) Send message into the OpenClaw session.
     # NOTE: sessions_send (via tools/invoke) typically returns the agent reply in-band
     # in the HTTP response (details.reply). This is more reliable than scraping history.
+    request_timeout_s = float(os.getenv("NANOBOT_OPENCLAW_REQUEST_TIMEOUT_S") or "60.0")
+
     send_data = None
     try:
-        async with httpx.AsyncClient(timeout=max(timeout_s, 20.0)) as client:
+        async with httpx.AsyncClient(timeout=max(timeout_s, request_timeout_s)) as client:
             r = await client.post(
                 tools_url,
                 headers=headers,
@@ -198,7 +200,7 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
 
     while time.time() - t0 < poll_timeout_s:
         try:
-            async with httpx.AsyncClient(timeout=max(timeout_s, 20.0)) as client:
+            async with httpx.AsyncClient(timeout=max(timeout_s, request_timeout_s)) as client:
                 hr = await client.post(
                     tools_url,
                     headers=headers,

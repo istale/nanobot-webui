@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md LICENSE ./
 COPY nanobot/ nanobot/
 COPY nanobot_api/ nanobot_api/
+COPY bridge/ bridge/
 
 RUN pip install --no-cache-dir -U pip \
  && pip install --no-cache-dir -e ".[api]"
