@@ -30,14 +30,23 @@ def test_openclaw_session_brain_mode(monkeypatch):
 
     calls = {"history": 0}
 
+    state = {"request_id": None}
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == httpx.URL("http://gw.local/tools/invoke")
         body = json.loads(request.content.decode("utf-8"))
         tool = body.get("tool")
         if tool == "sessions_send":
+            msg = body.get("args", {}).get("message", "")
+            # Extract request id from prompt
+            for line in msg.splitlines():
+                if line.startswith("- First line MUST be exactly: REQ:"):
+                    state["request_id"] = line.split("REQ:", 1)[1].strip()
+                    break
             return httpx.Response(200, json={"ok": True, "result": {"sent": True}})
         if tool == "sessions_history":
             calls["history"] += 1
+            rid = state.get("request_id") or "dummy"
             return httpx.Response(
                 200,
                 json={
@@ -45,7 +54,7 @@ def test_openclaw_session_brain_mode(monkeypatch):
                     "result": {
                         "messages": [
                             {"role": "user", "content": "x"},
-                            {"role": "assistant", "content": "鋼鐵人"},
+                            {"role": "assistant", "content": f"REQ:{rid}\\n鋼鐵人"},
                         ]
                     },
                 },

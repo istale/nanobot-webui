@@ -137,9 +137,14 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
     # Build a single message to the session. Keep it deterministic & parseable.
     import json as _json
 
+    request_id = uuid.uuid4().hex
+
     brain_prompt = (
         "You are the central brain helping a local Nanobot. "
-        "Given the full conversation messages below, reply with ONLY the best assistant reply text (no JSON, no markdown, no extra commentary).\n\n"
+        "Given the full conversation messages below, produce the best assistant reply.\n"
+        "IMPORTANT OUTPUT FORMAT:\n"
+        f"- First line MUST be exactly: REQ:{request_id}\n"
+        "- Then output ONLY the reply text (no JSON, no markdown, no extra commentary).\n\n"
         f"user={req.user!r} conversation_id={req.conversation_id!r}\n"
         "messages_json=\n"
         + _json.dumps([m.model_dump() for m in req.messages], ensure_ascii=False)
@@ -188,14 +193,36 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
                 else:
                     msgs = result or []
 
-                # Find last assistant content
+                # Find the assistant message matching our REQ id.
+                needle = f"REQ:{request_id}"
                 for m in reversed(msgs):
-                    if isinstance(m, dict) and m.get("role") == "assistant":
-                        content = (m.get("content") or "").strip()
-                        if content and content != last_seen:
-                            return BrainSuggestResponse(suggested_reply=content, confidence=0.5)
-                        last_seen = content or last_seen
-                        break
+                    if not (isinstance(m, dict) and m.get("role") == "assistant"):
+                        continue
+                    content = (m.get("content") or "").strip()
+                    if not content:
+                        continue
+                    if needle not in content:
+                        continue
+
+                    # Extract reply after the REQ line
+                    # Normalize possible literal "\\n" sequences coming from some transports
+                    if "\\n" in content and "\n" not in content:
+                        content = content.replace("\\n", "\n")
+
+                    lines = content.splitlines()
+                    try:
+                        idx = next(i for i, ln in enumerate(lines) if ln.strip() == needle)
+                    except StopIteration:
+                        idx = 0
+                    reply = "\n".join(lines[idx + 1 :]).strip()
+                    if reply:
+                        return BrainSuggestResponse(suggested_reply=reply, confidence=0.6)
+
+                    # If no reply after marker, still accept whole content as fallback.
+                    return BrainSuggestResponse(suggested_reply=content, confidence=0.4)
+
+                # keep polling
+                last_seen = None
         except Exception:
             pass
 

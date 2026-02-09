@@ -8,7 +8,10 @@ services:
     volumes:
       # Mount your nanobot config + workspace from host
       - ${HOME}/.nanobot:/root/.nanobot
+    env_file:
+      - .env
+    extra_hosts:
+      # Allow container to reach host loopback services (OpenClaw gateway)
+      - "host.docker.internal:host-gateway"
     environment:
-      # Optional: if you want to point LiteLLM at a different base URL
-      # - OPENAI_API_BASE=...
       - TZ=UTC
