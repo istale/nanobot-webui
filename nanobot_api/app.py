@@ -150,9 +150,12 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
         + _json.dumps([m.model_dump() for m in req.messages], ensure_ascii=False)
     )
 
-    # 1) Send message into the OpenClaw session
+    # 1) Send message into the OpenClaw session.
+    # NOTE: sessions_send (via tools/invoke) typically returns the agent reply in-band
+    # in the HTTP response (details.reply). This is more reliable than scraping history.
+    send_data = None
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with httpx.AsyncClient(timeout=max(timeout_s, 20.0)) as client:
             r = await client.post(
                 tools_url,
                 headers=headers,
@@ -162,67 +165,68 @@ async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | 
                 },
             )
             r.raise_for_status()
+            send_data = r.json()
     except Exception:
         return None
 
-    # 2) Poll session history for the next assistant message.
-    # Heuristic: look for the last assistant message in that session.
+    # Fast-path: parse reply from tools/invoke response
+    try:
+        # Expected: {ok:true,result:{details:{reply:"REQ:...\n..."}}}
+        result = send_data.get("result") if isinstance(send_data, dict) else None
+        details = result.get("details") if isinstance(result, dict) else None
+        content = (details.get("reply") if isinstance(details, dict) else None) or ""
+        content = str(content).strip()
+        needle = f"REQ:{request_id}"
+        if content and needle in content:
+            if "\\n" in content and "\n" not in content:
+                content = content.replace("\\n", "\n")
+            lines = content.splitlines()
+            # first line is marker
+            if lines and lines[0].strip() == needle:
+                reply = "\n".join(lines[1:]).strip()
+                if reply:
+                    return BrainSuggestResponse(suggested_reply=reply, confidence=0.7)
+            # fallback
+            return BrainSuggestResponse(suggested_reply=content, confidence=0.5)
+    except Exception:
+        pass
+
+    # 2) Fallback: poll session history for the next assistant message.
     poll_timeout_s = float(os.getenv("NANOBOT_OPENCLAW_POLL_TIMEOUT_S") or "6.0")
     poll_interval_s = float(os.getenv("NANOBOT_OPENCLAW_POLL_INTERVAL_S") or "0.3")
     t0 = time.time()
 
-    last_seen = None
-
     while time.time() - t0 < poll_timeout_s:
         try:
-            async with httpx.AsyncClient(timeout=timeout_s) as client:
+            async with httpx.AsyncClient(timeout=max(timeout_s, 20.0)) as client:
                 hr = await client.post(
                     tools_url,
                     headers=headers,
                     json={
                         "tool": "sessions_history",
-                        "args": {"sessionKey": session_key, "limit": 8, "includeTools": False},
+                        "args": {"sessionKey": session_key, "limit": 12, "includeTools": False},
                     },
                 )
                 hr.raise_for_status()
                 data = hr.json()
-                # tools/invoke returns {ok:true,result:<toolResult>}
                 result = data.get("result") if isinstance(data, dict) else None
-                if isinstance(result, dict) and "messages" in result:
-                    msgs = result.get("messages") or []
-                else:
-                    msgs = result or []
+                msgs = (result.get("messages") if isinstance(result, dict) else result) or []
 
-                # Find the assistant message matching our REQ id.
                 needle = f"REQ:{request_id}"
                 for m in reversed(msgs):
                     if not (isinstance(m, dict) and m.get("role") == "assistant"):
                         continue
                     content = (m.get("content") or "").strip()
-                    if not content:
+                    if not content or needle not in content:
                         continue
-                    if needle not in content:
-                        continue
-
-                    # Extract reply after the REQ line
-                    # Normalize possible literal "\\n" sequences coming from some transports
                     if "\\n" in content and "\n" not in content:
                         content = content.replace("\\n", "\n")
-
                     lines = content.splitlines()
-                    try:
-                        idx = next(i for i, ln in enumerate(lines) if ln.strip() == needle)
-                    except StopIteration:
-                        idx = 0
-                    reply = "\n".join(lines[idx + 1 :]).strip()
-                    if reply:
-                        return BrainSuggestResponse(suggested_reply=reply, confidence=0.6)
-
-                    # If no reply after marker, still accept whole content as fallback.
+                    if lines and lines[0].strip() == needle:
+                        reply = "\n".join(lines[1:]).strip()
+                        if reply:
+                            return BrainSuggestResponse(suggested_reply=reply, confidence=0.6)
                     return BrainSuggestResponse(suggested_reply=content, confidence=0.4)
-
-                # keep polling
-                last_seen = None
         except Exception:
             pass
 
