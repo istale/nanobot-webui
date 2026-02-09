@@ -83,33 +83,125 @@ def _extract_prompt(req: ChatCompletionsRequest) -> str:
 async def _brain_suggest(req: ChatCompletionsRequest) -> BrainSuggestResponse | None:
     """Ask the "central brain" for a reply suggestion.
 
-    Enable by setting env:
-      NANOBOT_BRAIN_SUGGEST_URL=http(s)://.../suggest
+    Modes (blocking):
 
-    This is synchronous (blocking) by design (user choice = 1).
+    1) External HTTP suggest endpoint (simple):
+       - NANOBOT_BRAIN_SUGGEST_URL=http(s)://.../suggest
+
+    2) Directly talk to an OpenClaw session via Gateway /tools/invoke (what user asked for):
+       - NANOBOT_OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789
+       - NANOBOT_OPENCLAW_TOKEN=...   (or NANOBOT_OPENCLAW_PASSWORD=...)
+       - NANOBOT_OPENCLAW_SESSION_KEY=main (default)
+
+    Central brain must never break the chat path.
     """
-    url = (os.getenv("NANOBOT_BRAIN_SUGGEST_URL") or "").strip()
-    if not url:
-        return None
-
-    payload = BrainSuggestRequest(
-        user=(req.user or "default").strip() or "default",
-        conversation_id=(req.conversation_id or "default").strip() or "default",
-        messages=req.messages,
-        model=req.model,
-    )
 
     timeout_s = float(os.getenv("NANOBOT_BRAIN_TIMEOUT_S") or "2.0")
 
+    # Mode 1: plain suggest URL
+    url = (os.getenv("NANOBOT_BRAIN_SUGGEST_URL") or "").strip()
+    if url:
+        payload = BrainSuggestRequest(
+            user=(req.user or "default").strip() or "default",
+            conversation_id=(req.conversation_id or "default").strip() or "default",
+            messages=req.messages,
+            model=req.model,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                r = await client.post(url, json=payload.model_dump(by_alias=True))
+                r.raise_for_status()
+                data = r.json()
+                return BrainSuggestResponse.model_validate(data)
+        except Exception:
+            return None
+
+    # Mode 2: OpenClaw session via Gateway tools-invoke
+    gw = (os.getenv("NANOBOT_OPENCLAW_GATEWAY_URL") or "").strip().rstrip("/")
+    if not gw:
+        return None
+
+    session_key = (os.getenv("NANOBOT_OPENCLAW_SESSION_KEY") or "main").strip() or "main"
+    token = (os.getenv("NANOBOT_OPENCLAW_TOKEN") or "").strip()
+    password = (os.getenv("NANOBOT_OPENCLAW_PASSWORD") or "").strip()
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    elif password:
+        headers["Authorization"] = f"Bearer {password}"
+
+    tools_url = f"{gw}/tools/invoke"
+
+    # Build a single message to the session. Keep it deterministic & parseable.
+    import json as _json
+
+    brain_prompt = (
+        "You are the central brain helping a local Nanobot. "
+        "Given the full conversation messages below, reply with ONLY the best assistant reply text (no JSON, no markdown, no extra commentary).\n\n"
+        f"user={req.user!r} conversation_id={req.conversation_id!r}\n"
+        "messages_json=\n"
+        + _json.dumps([m.model_dump() for m in req.messages], ensure_ascii=False)
+    )
+
+    # 1) Send message into the OpenClaw session
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            r = await client.post(url, json=payload.model_dump(by_alias=True))
+            r = await client.post(
+                tools_url,
+                headers=headers,
+                json={
+                    "tool": "sessions_send",
+                    "args": {"sessionKey": session_key, "message": brain_prompt},
+                },
+            )
             r.raise_for_status()
-            data = r.json()
-            return BrainSuggestResponse.model_validate(data)
     except Exception:
-        # Central brain must never break the chat path.
         return None
+
+    # 2) Poll session history for the next assistant message.
+    # Heuristic: look for the last assistant message in that session.
+    poll_timeout_s = float(os.getenv("NANOBOT_OPENCLAW_POLL_TIMEOUT_S") or "6.0")
+    poll_interval_s = float(os.getenv("NANOBOT_OPENCLAW_POLL_INTERVAL_S") or "0.3")
+    t0 = time.time()
+
+    last_seen = None
+
+    while time.time() - t0 < poll_timeout_s:
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                hr = await client.post(
+                    tools_url,
+                    headers=headers,
+                    json={
+                        "tool": "sessions_history",
+                        "args": {"sessionKey": session_key, "limit": 8, "includeTools": False},
+                    },
+                )
+                hr.raise_for_status()
+                data = hr.json()
+                # tools/invoke returns {ok:true,result:<toolResult>}
+                result = data.get("result") if isinstance(data, dict) else None
+                if isinstance(result, dict) and "messages" in result:
+                    msgs = result.get("messages") or []
+                else:
+                    msgs = result or []
+
+                # Find last assistant content
+                for m in reversed(msgs):
+                    if isinstance(m, dict) and m.get("role") == "assistant":
+                        content = (m.get("content") or "").strip()
+                        if content and content != last_seen:
+                            return BrainSuggestResponse(suggested_reply=content, confidence=0.5)
+                        last_seen = content or last_seen
+                        break
+        except Exception:
+            pass
+
+        await asyncio.sleep(poll_interval_s)
+
+    return None
 
 
 app = FastAPI(title="nanobot OpenAI-compatible API", version="0.1.0")
